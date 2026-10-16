@@ -1,72 +1,63 @@
 #!/bin/bash
 # ============================================================
-# 导出客户端配置（自动适配新版 OpenVPN 客户端）
+# 导出客户端配置（含完整性校验与端口修正）
 # ------------------------------------------------------------
 # 用法:
-#   ./export-client.sh <客户端名> [输出文件]
-#   ./export-client.sh client1
-#   ./export-client.sh client1 /tmp/myvpn.ovpn
-#
-# 作用:
-#   - 调用容器内 ovpn_getclient 导出配置
-#   - 将 cipher 替换为 data-ciphers（兼容 OpenVPN 2.5+）
-#   - 移除客户端不允许出现的服务端参数（duplicate-cn）
-#   - 输出文件权限设为 600
+#   ./export-client.sh                       # 用默认端口 1194
+#   ./export-client.sh 58110                 # 指定宿主机映射端口
+#   ./export-client.sh 58110 /tmp/vpn.ovpn   # 指定输出路径
 # ============================================================
 set -euo pipefail
 
-IMG=${IMG:-openvpn-firewall:v1}
+CONTAINER=${CONTAINER:-openvpn-server}
+HOST_PORT=${1:-1194}
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DATA="$BASE/data"
+OUT=${2:-$BASE/client.ovpn}
 
-if [ $# -lt 1 ]; then
-  echo "用法: $0 <客户端名> [输出文件]"
-  echo "  例: $0 client1"
-  echo "  例: $0 client1 /tmp/myvpn.ovpn"
-  exit 1
+echo "导出客户端配置"
+echo "  容器      : $CONTAINER"
+echo "  宿主机端口: $HOST_PORT"
+echo "  输出      : $OUT"
+
+# 容器内端口（从 server.conf 读取，默认 1194）
+C_PORT=$(docker exec "$CONTAINER" sh -c 'grep -E "^port " /etc/openvpn/server.conf | awk "{print \$2}"' 2>/dev/null || echo 1194)
+C_PORT=${C_PORT:-1194}
+
+docker exec "$CONTAINER" /usr/local/bin/show-client-config > "$OUT" 2>/dev/null
+
+# 端口修正：容器内端口 → 宿主机映射端口
+if [ "$C_PORT" != "$HOST_PORT" ]; then
+  sed -i "s| $C_PORT udp| $HOST_PORT udp|" "$OUT"
+  echo "  · 端口已修正: $C_PORT → $HOST_PORT"
 fi
-
-CLIENT="$1"
-OUT="${2:-$BASE/$CLIENT.ovpn}"
-
-if [ ! -f "$DATA/pki/issued/$CLIENT.crt" ]; then
-  echo "❌ 未找到客户端证书: $DATA/pki/issued/$CLIENT.crt"
-  echo "   可用的客户端:"
-  docker run --rm -v "$DATA:/etc/openvpn" "$IMG" ovpn_listclients 2>/dev/null | sed 's/^/     /'
-  exit 1
-fi
-
-echo "导出客户端配置: $CLIENT"
-
-docker run --rm -v "$DATA:/etc/openvpn" "$IMG" \
-  ovpn_getclient "$CLIENT" > "$OUT"
-
-# 后处理：修正新旧客户端兼容性 + 移除服务端专用参数
-python3 - "$OUT" <<'PYEOF'
-import sys
-p = sys.argv[1]
-lines = open(p, encoding='utf-8').read().splitlines()
-out, changed = [], []
-for ln in lines:
-    s = ln.strip()
-    if s.startswith('cipher '):
-        out.append('data-ciphers AES-256-GCM:AES-128-GCM:AES-256-CBC')
-        changed.append('cipher → data-ciphers')
-        continue
-    if s == 'duplicate-cn':
-        changed.append('移除 duplicate-cn（服务端专用）')
-        continue
-    out.append(ln)
-open(p, 'w', encoding='utf-8').write('\n'.join(out) + '\n')
-for c in changed:
-    print(f"  · {c}")
-PYEOF
 
 chmod 600 "$OUT"
 
-echo "  ✅ 已导出: $OUT"
 echo
 echo "  --- 关键配置 ---"
-grep -nE '^remote |^proto|^data-ciphers|^auth |route|redirect-gateway|dhcp-option' "$OUT" | sed 's/^/    /'
+grep -nE '^remote |^proto|^dev |^auth |key-direction' "$OUT" | sed 's/^/    /'
+
 echo
-echo "  ⚠️  该文件包含私钥，请妥善保管，切勿提交到代码库"
+echo "  --- 完整性校验 ---"
+fail=0
+for k in '^client$' '^<ca>' '^<tls-auth>' '^<cert>' '^<key>'; do
+  n=$(grep -c "$k" "$OUT" 2>/dev/null || echo 0)
+  if [ "$n" -ge 1 ]; then
+    echo "    ✅ $k"
+  else
+    echo "    ❌ $k 缺失"
+    fail=1
+  fi
+done
+
+if [ "$fail" = "1" ]; then
+  echo
+  echo "  ⚠️ 配置不完整！可能原因："
+  echo "     · USE_CLIENT_CERTIFICATE 未设为 true → 不会有 <cert>/<key>"
+  echo "     · 客户端证书未签发 → 见 README 常见问题 Q1"
+  exit 1
+fi
+
+echo
+echo "  ✅ 已导出: $OUT"
+echo "  ⚠️  该文件包含客户端私钥，请妥善保管，切勿提交到代码库"
