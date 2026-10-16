@@ -116,6 +116,148 @@ chmod 600 client.ovpn
 
 客户端配置中应包含：`<ca>`、`<tls-auth>`、`<cert>`、`<key>` 四段。
 
+## 完整配置示例
+
+> 仓库中可直接使用的示例文件：
+> - [`examples/docker-compose.yml`](examples/docker-compose.yml) —— 完整可运行示例
+> - [`examples/iptables`](examples/iptables) —— 白名单规则模板
+>
+> 示例中的 IP 均为 RFC 5737 文档专用地址（`192.0.2.x`），请按实际替换。
+
+### 部署方式说明
+
+本项目采用 **「docker run 生成 PKI + docker compose 运行服务」** 的组合：
+
+| 阶段 | 命令 | 用途 | 频次 |
+|---|---|---|---|
+| **① 构建镜像** | `docker build` | 构建 `openvpn-no-ldap:v1` | 一次 |
+| **② 生成 PKI** | `docker run --rm` | 生成服务端证书（**因缺客户端证书会退出，属正常**）| 一次 |
+| **③ 签发客户端证书** | `docker run --rm` | `easyrsa build-client-full client nopass` | 每次加客户端 |
+| **④ 运行服务** | **`docker compose up -d`** | 后台常驻运行 | 部署/更新时 |
+| **⑤ 导出客户端配置** | `docker exec` | `show-client-config` | 每次改 PKI 后 |
+
+**为什么不用 compose 做 ②/③**：这两个步骤是**一次性初始化动作**，用 `docker run --rm` 更直观，且不会污染 compose 的生命周期管理。
+
+### docker-compose.yml（完整版）
+
+```yaml
+version: '3.8'
+
+services:
+  openvpn:
+    image: openvpn-no-ldap:v1
+    container_name: openvpn-server
+    volumes:
+      - ./data:/etc/openvpn
+    ports:
+      - "1194:1194/udp"                    # 宿主机端口:容器端口
+    environment:
+      # ★★★ 核心开关：关闭 LDAP，启用纯客户端证书认证
+      - USE_CLIENT_CERTIFICATE=true
+
+      # ---------- 基础 ----------
+      - OVPN_SERVER_CN=vpn.example.com     # 服务端证书 CN（客户端配置里的 remote 域名）
+      - OVPN_PORT=1194
+      - OVPN_PROTOCOL=udp
+      - OVPN_INTERFACE_NAME=tun
+      - OVPN_NETWORK=172.28.0.0 255.255.255.0   # VPN 内部网段
+      - OVPN_DEFAULT_SERVER=true
+      - OVPN_NAT=true                       # 启用自动 NAT
+      - LOG_TO_STDOUT=true
+      - OVPN_VERBOSITY=3
+
+      # ---------- 路由（自动 push + 自动 MASQUERADE）----------
+      # 镜像会据此自动完成：
+      #   1. push "route 192.0.2.10"  → 客户端把该目标流量送进隧道
+      #   2. iptables MASQUERADE      → 目标机回包能找到路
+      - OVPN_ROUTES=192.0.2.10
+
+      # ---------- iptables 白名单（最小权限）----------
+      # 镜像执行：iptables-restore -nv <此文件>
+      - IPTABLES_EXTRA_FILE=/etc/openvpn/iptables
+
+      # ---------- DNS（不需要则不设置）----------
+      # - OVPN_DNS_SERVERS=192.0.2.1,192.0.2.2
+
+      # ---------- 安全 ----------
+      - REGENERATE_CERTS=false              # 勿轻易置 true：会重建 PKI，所有客户端配置失效
+      - KEY_LENGTH=2048
+      - FAIL2BAN_ENABLED=false
+
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    restart: always
+    # ⚠️ 不要定义 networks 段，避免子网冲突
+```
+
+### data/iptables（白名单规则）
+
+`IPTABLES_EXTRA_FILE` 指向的文件内容（**`iptables-restore` 会整体替换 filter 表，必须写完整规则集**）：
+
+```iptables
+*filter
+:INPUT ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+
+# ---------- INPUT ----------
+-A INPUT -p icmp -j ACCEPT
+-A INPUT -i lo -j ACCEPT
+-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A INPUT -i tun0 -j ACCEPT
+
+# ---------- FORWARD: 基础放行 ----------
+-A FORWARD -p icmp -j ACCEPT
+# 已建立连接的返回流量（保证回包能出，勿删）
+-A FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+# ---------- FORWARD: 目标机白名单 ----------
+-A FORWARD -i tun0 -o eth0 -p icmp -d 192.0.2.10 -j ACCEPT
+-A FORWARD -i tun0 -o eth0 -p tcp -m multiport --dports 5985,5986 -d 192.0.2.10 -j ACCEPT
+-A FORWARD -i tun0 -o eth0 -p tcp -m multiport --dports 3389 -d 192.0.2.10 -j ACCEPT
+-A FORWARD -i tun0 -o eth0 -p tcp -m multiport --dports 8088 -d 192.0.2.10 -j ACCEPT
+
+# ---------- 默认拒绝 ----------
+# ⚠️ 必须在所有 ACCEPT 之后
+-A FORWARD -i tun0 -j DROP
+
+COMMIT
+```
+
+### 部署后验证
+
+```bash
+# 1) 容器状态
+docker ps | grep openvpn-server
+
+# 2) 自动生成的 NAT（关注 pkts 是否增长）
+docker exec openvpn-server iptables -t nat -L POSTROUTING -n -v
+# 期望: MASQUERADE  -s 172.28.0.0/24 -d 192.0.2.0/24 -o eth0
+
+# 3) 白名单是否加载
+docker exec openvpn-server iptables -L FORWARD -n --line-numbers
+# 期望: 最后一条为 DROP，前面为各目标端口的 ACCEPT
+
+# 4) 推送的路由
+docker exec openvpn-server sh -c 'grep "^push" /etc/openvpn/server.conf'
+# 期望: push "route 192.0.2.10"
+
+# 5) 导出客户端配置
+docker exec openvpn-server /usr/local/bin/show-client-config > client.ovpn
+```
+
+### ⚠️ 修改 compose 后必须重建容器
+
+```bash
+# ❌ 错误：restart 不会重新加载 environment
+docker compose restart
+
+# ✅ 正确：down + up 才会真正重建
+docker compose down && docker compose up -d
+```
+
 ## 配置说明
 
 | 环境变量 | 示例值 | 说明 |

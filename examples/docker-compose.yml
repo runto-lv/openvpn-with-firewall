@@ -1,0 +1,65 @@
+version: '3.8'
+
+# ============================================================
+# OpenVPN 无 LDAP（纯证书）—— 完整可运行示例
+# ------------------------------------------------------------
+# 使用步骤：
+#   1. 构建镜像（见 README「1. 构建镜像」）
+#   2. 生成 PKI 并签发客户端证书（见 README「3/4 步」）
+#   3. docker compose up -d
+#   4. 导出客户端配置（见 README「6 步」）
+#
+# ⚠️ 本文件中的 IP 均为 RFC 5737 文档专用地址，请按实际替换：
+#   192.0.2.10  → 你要访问的内网目标主机
+#   172.28.0.0  → VPN 内部网段（避开办公网/数据中心/云 VPC）
+# ============================================================
+
+services:
+  openvpn:
+    image: openvpn-no-ldap:v1
+    container_name: openvpn-server
+    volumes:
+      - ./data:/etc/openvpn
+    ports:
+      - "1194:1194/udp"
+    environment:
+      # ★★★ 关闭 LDAP，启用纯客户端证书认证
+      - USE_CLIENT_CERTIFICATE=true
+
+      # ---------- 基础 ----------
+      - OVPN_SERVER_CN=vpn.example.com
+      - OVPN_PORT=1194
+      - OVPN_PROTOCOL=udp
+      - OVPN_INTERFACE_NAME=tun
+      - OVPN_NETWORK=172.28.0.0 255.255.255.0
+      - OVPN_DEFAULT_SERVER=true
+      - OVPN_NAT=true
+      - LOG_TO_STDOUT=true
+      - OVPN_VERBOSITY=3
+
+      # ---------- 路由（自动 push + 自动 MASQUERADE）----------
+      # ★ 镜像会根据此值自动完成两件事：
+      #     1. push "route <此值>"  → 客户端把目标流量送进隧道
+      #     2. iptables MASQUERADE  → 目标机回包能找到路
+      #   多个目标用英文逗号分隔，如：192.0.2.10,192.0.2.11
+      - OVPN_ROUTES=192.0.2.10
+
+      # ---------- iptables 白名单（最小权限）----------
+      # ★ 镜像执行：iptables-restore -nv <此文件>
+      #   强制把访问范围限制到指定 IP 与端口，其余转发一律 DROP
+      - IPTABLES_EXTRA_FILE=/etc/openvpn/iptables
+
+      # ---------- DNS（不需要则不设置）----------
+      # - OVPN_DNS_SERVERS=192.0.2.1,192.0.2.2
+
+      # ---------- 安全 ----------
+      - REGENERATE_CERTS=false
+      - KEY_LENGTH=2048
+      - FAIL2BAN_ENABLED=false
+
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    restart: always
+    # ⚠️ 不要定义 networks 段，避免子网冲突
