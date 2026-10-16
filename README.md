@@ -46,7 +46,7 @@ fi
 
 ```
 # 部署后自动生成（示例）
--A POSTROUTING -s 172.28.0.0/24 -d 192.168.120.0/24 -o eth0 -j MASQUERADE
+-A POSTROUTING -s 172.28.0.0/24 -d 192.0.2.0/24 -o eth0 -j MASQUERADE
 ```
 
 ## 快速开始
