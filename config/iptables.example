@@ -1,0 +1,54 @@
+# ============================================================
+# iptables 白名单示例（供 iptables-restore 加载）
+# ------------------------------------------------------------
+# 放置位置：<项目目录>/data/iptables
+# 生效方式：容器启动时由 ovpn-entrypoint.sh 自动执行
+#           iptables-restore < /etc/openvpn/iptables
+#
+# 【设计说明】
+#   tun0 是 OpenVPN 的虚拟接口，来自 VPN 客户端的流量都从这里进来。
+#   FORWARD 链上的规则决定「拨入后能访问什么」。
+#   最后一条 `-A FORWARD -i tun0 -j DROP` 是默认拒绝，不可省略。
+# ============================================================
+
+*filter
+:INPUT ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+
+# ---------- INPUT：允许基础流量 ----------
+-A INPUT -p icmp -j ACCEPT
+-A INPUT -i lo -j ACCEPT
+-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A INPUT -i tun0 -j ACCEPT
+
+# ---------- FORWARD：允许基础流量 ----------
+-A FORWARD -p icmp -j ACCEPT
+# 已建立的连接回包必须放行，否则只有单向通
+-A FORWARD -i tun0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+# ------------------------------------------------------------
+# ★ 白名单规则（按需增删）
+#   语法: -A FORWARD -i tun0 -p <tcp|udp> \
+#              -m multiport --dports <端口列表> -d <目标IP> -j ACCEPT
+# ------------------------------------------------------------
+
+# 示例 1：允许 RDP
+-A FORWARD -i tun0 -p tcp -m multiport --dports 3389 -d 192.0.2.10 -j ACCEPT
+
+# 示例 2：允许 WinRM（HTTP / HTTPS）
+-A FORWARD -i tun0 -p tcp -m multiport --dports 5985,5986 -d 192.0.2.10 -j ACCEPT
+
+# 示例 3：允许 HTTPS 与自定义应用端口
+-A FORWARD -i tun0 -p tcp -m multiport --dports 443,8088 -d 192.0.2.10 -j ACCEPT
+
+# 示例 4：允许 ICMP（ping 目标主机）
+-A FORWARD -i tun0 -p icmp -d 192.0.2.10 -j ACCEPT
+
+# ------------------------------------------------------------
+# ★ 默认拒绝：不在白名单内的一律丢弃
+#   ⚠️ 必须放在所有 ACCEPT 规则之后
+# ------------------------------------------------------------
+-A FORWARD -i tun0 -j DROP
+
+COMMIT

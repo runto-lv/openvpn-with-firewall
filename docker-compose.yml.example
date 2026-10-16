@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  openvpn:
+    image: openvpn-firewall:v1
+    container_name: openvpn-server
+    volumes:
+      - ./data:/etc/openvpn
+    ports:
+      - "1194:1194/udp"
+    environment:
+      # 白名单规则文件路径（容器内）
+      - IPTABLES_EXTRA_FILE=/etc/openvpn/iptables
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    restart: always
+    # ⚠️ 不要定义 networks 段！
+    # 自定义 subnet 容易与宿主机已有网络 / 内网 / 云 VPC 冲突，
+    # 导致启动报错：invalid pool request: Pool overlaps with other one on this address space
+    # 让 Docker 从 daemon.json 的 default-address-pools 自动分配即可。

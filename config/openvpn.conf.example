@@ -1,0 +1,66 @@
+# ============================================================
+# OpenVPN 服务端配置示例（由 ovpn_genconfig 生成后微调）
+# ------------------------------------------------------------
+# 生成命令参考：
+#   ovpn_genconfig \
+#     -u udp://vpn.example.com:1194 \
+#     -s 172.28.0.0/24 \
+#     -d -b \
+#     -p "route 192.0.2.10 255.255.255.255" \
+#     -C AES-256-CBC -a SHA256
+# ============================================================
+
+# ---------- VPN 内部网段 ----------
+# ⚠️ 请使用不与办公网 / 数据中心 / 云 VPC 冲突的网段
+server 172.28.0.0 255.255.255.0
+
+verb 3
+
+# ---------- PKI ----------
+key  /etc/openvpn/pki/private/vpn.example.com.key
+ca   /etc/openvpn/pki/ca.crt
+cert /etc/openvpn/pki/issued/vpn.example.com.crt
+dh   /etc/openvpn/pki/dh.pem
+tls-auth /etc/openvpn/pki/ta.key
+key-direction 0
+
+keepalive 10 60
+persist-key
+persist-tun
+
+# ---------- 协议与端口 ----------
+proto udp
+# 端口由 Docker 做映射，容器内固定 1194
+port 1194
+dev tun0
+
+status /tmp/openvpn-status.log
+
+user  nobody
+group nogroup
+
+# ---------- 加密 ----------
+# ⚠️ 必须是真实加密算法（AES-256-CBC 等）
+#    ovpn_genconfig 默认会生成 "cipher SHA256"，那是无效配置，务必修正
+cipher AES-256-CBC
+auth   SHA256
+comp-lzo no
+
+# ---------- 允许同一证书多客户端 ----------
+duplicate-cn
+
+# ---------- 路由（仅服务端生效）----------
+# 注意：裸 route 不会下发给客户端
+route 192.0.2.10 255.255.255.255
+
+# ---------- 推送给客户端的配置 ----------
+# ★ 关键：用 push "route ..." 才能让客户端知道这些目标要走 VPN
+push "route 192.0.2.10 255.255.255.255"
+
+# ⚠️ 以下两项若存在，会导致客户端连上 VPN 后无法上网：
+#   push "redirect-gateway def1"       ← 劫持客户端默认路由
+#   push "block-outside-dns"            ← 阻断外部 DNS
+# 使用 ovpn_genconfig 的 -d / -b 参数即可避免。
+#
+# ⚠️ 若不需要为客户端指定 DNS，请勿添加：
+#   push "dhcp-option DNS 8.8.8.8"
